@@ -1,54 +1,11 @@
-from Dataset import RoadNetworkDataset
-# Accuracy, Precision, Recall, F1
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import wasserstein_distance
 import torch
 import torch.nn.functional as func
-import numpy as np
 from jaxtyping import Float32 as F32
 from typing import Tuple, List
-from shapely.geometry import LineString
-import cv2
-import networkx as nx
 
 Tensor = torch.Tensor
-
-
-def heatmapMetric(pred_heatmap: F32[Tensor, "B 1 H W"],
-                  target_heatmap: F32[Tensor, "B 1 H W"],
-                  threshold: float = 0.5) -> Tuple[List[float], List[float], List[float], List[float]]:
-    """
-    Compute the scores between road network projected to 2D (heatmaps)
-
-    :param pred_heatmap: the predicted road network heatmap (after sigmoid)
-    :param target_heatmap: the target road network heatmap (binary)
-    :param threshold: threshold for binarization
-    :return: accuracy, precision, recall, f1
-    """
-    B = pred_heatmap.shape[0]
-
-    batch_accuracy = []
-    batch_precision = []
-    batch_recall = []
-    batch_f1 = []
-
-    pred_flatten = np.int32(pred_heatmap.view(B, -1).cpu().numpy() > threshold)
-    target_flatten = np.int32(target_heatmap.view(B, -1).cpu().numpy() > threshold)
-
-    for b in range(B):
-        accuracy = accuracy_score(target_flatten[b], pred_flatten[b])
-        precision = precision_score(target_flatten[b], pred_flatten[b])
-        recall = recall_score(target_flatten[b], pred_flatten[b])
-        f1 = f1_score(target_flatten[b], pred_flatten[b])
-
-        batch_accuracy.append(accuracy)
-        batch_precision.append(precision)
-        batch_recall.append(recall)
-        batch_f1.append(f1)
-
-    return batch_accuracy, batch_precision, batch_recall, batch_f1
-
 
 def hungarianMetric(batch_pred_segs: List[F32[Tensor, "P N_interp 2"]],
                     batch_target_segs: List[F32[Tensor, "Q N_interp 2"]]) -> Tuple[List[float], List[float]]:
@@ -161,24 +118,6 @@ def chamferMetric(batch_pred_segs: List[F32[Tensor, "P N_interp 2"]],
     return mae_list, mse_list
 
 
-def segCountMetric(batch_pred_segs: List[F32[Tensor, "P N_interp 2"]],
-                     batch_target_segs: List[F32[Tensor, "Q N_interp 2"]]) -> List[float]:
-    """
-    Compute the difference in the number of segments in the predicted and target segments
-    :param batch_pred_segs: the predicted segments
-    :param batch_target_segs: the target segments
-    :return: the difference in the number of segments in the predicted and target segments
-    """
-    B = len(batch_pred_segs)
-
-    pred_counts = [segs.shape[0] for segs in batch_pred_segs]
-    target_counts = [segs.shape[0] for segs in batch_target_segs]
-
-    diff_counts = [float(abs(pred_counts[i] - target_counts[i])) for i in range(B)]
-
-    return diff_counts
-
-
 def segLengthMetric(batch_pred_segs: List[F32[Tensor, "P N_interp 2"]],
                     batch_target_segs: List[F32[Tensor, "Q N_interp 2"]]) -> List[float]:
     """
@@ -212,156 +151,6 @@ def segLengthMetric(batch_pred_segs: List[F32[Tensor, "P N_interp 2"]],
 
     return distribution_diffs
 
-def renderPlot(image, src, dst, current):
-    rgb = np.zeros((image.shape[0], image.shape[1], 3), dtype=np.uint8)
-    rgb[..., 0] = image
-    rgb[..., 1] = image
-    rgb[..., 2] = image
-
-    cv2.putText(rgb, "s", (src[0], src[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
-    cv2.putText(rgb, "d", (dst[0], dst[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-    cv2.circle(rgb, current, 3, (0, 255, 0), 1)
-
-    cv2.imwrite("search_map.png", cv2.resize(rgb, (512, 512), interpolation=cv2.INTER_NEAREST))
-
-
-def findAndAddPath(graph, heatmap, src, dst, visualize) -> LineString:
-    # Reached another keynode
-    search_grid = np.int32(heatmap > 0)
-    H, W = search_grid.shape
-
-    # skip if edge already exists
-    if graph.has_edge(f"{src[0]}_{src[1]}", f"{dst[0]}_{dst[1]}"):
-        return None
-    # Try to find a path from (kx, ky) to (x, y) with greedy search
-    path = [src]
-    current = src
-    while current != dst:
-        # Take the pixel with the smallest distance to the target
-        neighbors = [(current[0] + dx, current[1] + dy) for dx in [-1, 0, 1] for dy in [-1, 0, 1]]
-        neighbors.remove(current)
-        # if len(path) > 1:
-        #     neighbors.remove((path[-2][0], path[-2][1]))
-        neighbors = list(filter(lambda p: 0 <= p[0] < W and 0 <= p[1] < H and search_grid[p[1], p[0]] != 0, neighbors))
-
-        # Compute heuristic distance to the target
-        # grid_values are the values of the heatmap at the neighbors
-        # higher values means more visited
-        grid_values = np.array([search_grid[p[1], p[0]] for p in neighbors])
-        distance = np.linalg.norm(np.array(neighbors) - np.array([dst]), axis=1) + grid_values
-
-        nearest_id = np.argmin(distance)
-        current = neighbors[nearest_id]
-
-        # update the search grid
-        search_grid[current[1], current[0]] += 1
-
-        path.append(current)
-
-        if visualize:
-            tmp = heatmap.copy()
-            tmp[current[1], current[0]] = 255
-            cv2.imshow("search_map", cv2.resize(tmp, (512, 512), interpolation=cv2.INTER_NEAREST))
-            cv2.waitKey(1)
-
-    geometry = LineString(path)
-
-    length = geometry.length
-    interp_times = np.linspace(0, length, 8)
-    geometry = LineString([geometry.interpolate(i) for i in interp_times])
-
-    graph.add_edge(f"{src[0]}_{src[1]}", f"{dst[0]}_{dst[1]}", geometry=geometry)
-
-
-def heatmapsToSegments(pred_heatmaps: F32[Tensor, "B 1 H W"],
-                       pred_nodemaps: F32[Tensor, "B 1 H W"],
-                       visualize: bool = False) -> List[F32[Tensor, "P N_interp 2"]]:
-    B, _, H, W = pred_heatmaps.shape
-
-    segs = []
-
-    pred_heatmaps = pred_heatmaps.cpu().numpy()
-    local_max_map = torch.nn.functional.max_pool2d(pred_nodemaps, 3, 1, 1)
-    nms_nodemaps = torch.where((pred_nodemaps == local_max_map) * (pred_nodemaps >= 0.2), 1, 0)
-    nms_nodemaps = nms_nodemaps.cpu().numpy()
-
-    for i in range(B):
-        pred_heatmap = pred_heatmaps[i, 0]
-        nodemap = nms_nodemaps[i, 0]
-
-        x_list, y_list = np.where(nodemap == 1)
-        keynodes = zip(x_list, y_list)
-
-        corner_map = np.zeros_like(np.uint8(pred_heatmap))
-        graph = nx.Graph()
-        for (x, y) in keynodes:
-            corner_map[y, x] = 255
-            pred_heatmap[y, x] = 1.0
-            graph.add_node(f"{x}_{y}", pos=(x, y))
-
-        # Now extract the edges (1-pixel wide) from the predicted heatmap
-        edge_map = np.uint8(pred_heatmap > 0.5) * 255
-
-        cv2.imwrite("edge_map.png", edge_map)
-
-        temp_map = edge_map.copy()
-
-        # Flood fill from a keynode until it reaches another keynode
-        for ki, (kx, ky) in enumerate(keynodes):
-            frontier = {(kx, ky)}
-            while frontier:
-                new_frontier = set()
-                for (x, y) in frontier:
-                    temp_map[y, x] = 64
-
-                    # If this pixel is close to another keynode, stop, connect this keynode and the reached keynode
-                    distances = np.linalg.norm(keynodes - np.array([x, y]), 2, axis=1)  # (num_keynodes,)
-                    # set distance to itself to infinity
-                    distances[ki] = np.inf
-                    nearest_id = np.argmin(distances)
-                    if distances[nearest_id] < 2:
-                        src = (kx, ky)
-                        dst = (keynodes[nearest_id][0], keynodes[nearest_id][1])
-                        findAndAddPath(graph, temp_map, src, dst, visualize)
-                        continue
-
-                    # Check neighbors
-                    neighbors = [(x + dx, y + dy) for dx in [-1, 0, 1] for dy in [-1, 0, 1]]
-                    neighbors.remove((x, y))
-                    for (newx, newy) in neighbors:
-                        if 0 <= newx < W and 0 <= newy < H and edge_map[newy, newx] != 0 and temp_map[newy, newx] == 255:
-                            new_frontier.add((newx, newy))
-
-                frontier = new_frontier
-                if visualize:
-                    cv2.imshow("temp_map", temp_map)
-                    cv2.waitKey(1)
-
-        segs.append(
-            torch.tensor([data["geometry"].coords for u, v, data in graph.edges(data=True)], dtype=torch.float32,
-                         device=pred_nodemaps.device))
-
-        for seg_i in range(len(segs[-1])):
-            if segs[-1][seg_i, 0, 0] > segs[-1][seg_i, -1, 0]:
-                segs[-1][seg_i] = segs[-1][seg_i].flip(0)
-
-        try:
-            # z-score normalize segments to 0-1
-            mean_point = torch.mean(segs[-1].flatten(0, 1), dim=0)
-            std_point = torch.std(segs[-1].flatten(0, 1), dim=0)
-            segs[-1] = (segs[-1] - mean_point) / std_point
-
-            # max_point = torch.max(segs[-1].flatten(0, 1), dim=0).values
-            # min_point = torch.min(segs[-1].flatten(0, 1), dim=0).values
-            # point_range = max_point - min_point
-            # segs[-1] = ((segs[-1] - min_point) / point_range)
-            if torch.any(torch.isnan(segs[-1])):
-                print("nan")
-        except:
-            segs[-1] = torch.zeros(1, 8, 2, dtype=torch.float32, device=pred_nodemaps.device)
-
-    return segs
-
 
 def reportAllMetrics(batch_pred_segs: List[F32[Tensor, "P N_interp 2"]],
                      batch_target_segs: List[F32[Tensor, "Q N_interp 2"]]) -> List[List[float]]:
@@ -376,10 +165,6 @@ def reportAllMetrics(batch_pred_segs: List[F32[Tensor, "P N_interp 2"]],
     # heatmap_accuracy, heatmap_precision, heatmap_recall, heatmap_f1 = heatmapMetric(pred_heatmap, target_heatmap)
     hungarian_mae, hungarian_mse = hungarianMetric(batch_pred_segs, batch_target_segs)
     chamfer_mae, chamfer_mse = chamferMetric(batch_pred_segs, batch_target_segs)
-    diff_seg_count = segCountMetric(batch_pred_segs, batch_target_segs)
     diff_seg_length = segLengthMetric(batch_pred_segs, batch_target_segs)
 
-    return [hungarian_mae, hungarian_mse, chamfer_mae, chamfer_mse, diff_seg_count, diff_seg_length]
-
-    # return [heatmap_accuracy, heatmap_precision, heatmap_recall, heatmap_f1,
-    #         hungarian_mae, hungarian_mse, chamfer_mae, chamfer_mse]
+    return [hungarian_mae, hungarian_mse, chamfer_mae, chamfer_mse, diff_seg_length]

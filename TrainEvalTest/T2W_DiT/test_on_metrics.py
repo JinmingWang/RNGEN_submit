@@ -57,9 +57,9 @@ def test(
         T=500,
         beta_min = 0.0001,
         beta_max = 0.05,
-        data_path = "Dataset/Tokyo",
-        vae_path = "Runs/CDVAE/241127_1833_sparse_kl1e-6/last.pth",
-        model_path = "Runs/RoutesDiT/241129_2126_295M/last.pth"
+        data_path = "",
+        vae_path = "",
+        model_path = ""
 ):
     B = 50
     dataset = RoadNetworkDataset(folder_path=data_path,
@@ -86,16 +86,12 @@ def test(
                   d_context=2,
                   n_layers=8,
                   T=T).to(DEVICE)
-    #loadModels("Runs/RoutesDiT/241129_0108_300M/last.pth", T2W_DiT=T2W_DiT)
     loadModels(model_path, DiT=DiT)
-
-    # state_dict = torch.load("Runs/PathsDiT/241128_0811_KL1e-6/last.pth")
-    # T2W_DiT.load_state_dict(state_dict)
-    # T2W_DiT.eval()
+    DiT.eval()
 
     ddim = DDIM(beta_min, beta_max, T, DEVICE, "quadratic", skip_step=10, data_dim=3)
 
-    titles = ["hungarian_mae", "hungarian_mse", "chamfer_mae", "chamfer_mse", "diff_seg_count", "diff_seg_len"]
+    titles = ["hungarian_mae", "hungarian_mse", "chamfer_mae", "chamfer_mse", "diff_seg_len"]
 
     name = "GraphWalker"
 
@@ -109,26 +105,7 @@ def test(
                 latent_pred = ddim.diffusionBackward([latent_noise], pred_func, mode="eps", model=DiT, trajs=batch["trajs"])[0]
                 duplicate_segs, cluster_mat, cluster_means, coi_means = vae.decode(latent_pred)
 
-            # plot_manager = PlotManager(4, 2, 5)
-            # plot_manager.plotSegments(batch["routes"][0], 0, 0, "Routes", color="red")
-            # plot_manager.plotSegments(batch["segs"][0], 0, 1, "Segs", color="blue")
-            # plot_manager.plotSegments(coi_means[0], 0, 2, "Pred Segs", color="green")
-
-            # norm_pred_segs = duplicate_segs  # (1, N_segs, N_interp, 2)
-            # max_point = torch.max(norm_pred_segs.view(-1, 2), dim=0).values.view(1, 1, 2)
-            # min_point = torch.min(norm_pred_segs.view(-1, 2), dim=0).values.view(1, 1, 2)
-            # point_range = max_point - min_point
-
-            # pred_heatmaps = segsToHeatmaps(coi_means, batch["trajs"], batch["L_traj"], 256, 256, 3)
-
             batch_scores = reportAllMetrics(coi_means, [batch["segs"][b][:batch["N_segs"][b]] for b in range(B)])
-
-            # plot_manager.plotSegments(duplicate_segs[0], 0, 3, "Pred Duplicate Segs")
-            # plot_manager.plotTrajs(batch["trajs"][0], 0, 4, "Trajectories")
-            # plot_manager.plotHeatmap(batch["target_heatmaps"][0], 1, 0, "Target Heatmap")
-            # plot_manager.plotHeatmap(pred_heatmaps[0], 1, 1, "Predict Heatmap")
-            #
-            # plt.savefig("Result.png", dpi=100)
 
             batch_scores = np.array(batch_scores).T
 
